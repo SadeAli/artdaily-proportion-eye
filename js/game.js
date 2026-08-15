@@ -179,29 +179,61 @@
     return out;
   }
 
+  /* getComputedStyle() on the root forces a style resolve, and this ran at
+     the top of every repaint — once per pointer sample while a tick is
+     under the hand — plus two hex parses and a mix for the accent. The
+     tokens only move when the sheet flips theme, so cache them against
+     data-theme; the cache invalidates itself the moment that attribute
+     changes, so onTheme still repaints in the new colours. */
+  var inkCache = null, inkKey = null;
   function inks() {
+    var key = document.documentElement.dataset.theme || '';
+    if (inkCache && inkKey === key) return inkCache;
     var cs = getComputedStyle(document.documentElement);
     var ink = cs.getPropertyValue('--ink').trim();
     var accent = cs.getPropertyValue('--game-accent').trim() || cs.getPropertyValue('--mint').trim();
-    return {
+    inkKey = key;
+    inkCache = {
       ink: ink,
       muted: cs.getPropertyValue('--muted').trim(),
       card: cs.getPropertyValue('--card').trim(),
       accent: ArtDaily.theme() === 'light' ? mixHex(accent, ink, 0.55) : accent,
     };
+    return inkCache;
   }
 
-  /* ---- crisp canvas at any devicePixelRatio; height tracks width ---- */
-  var W = 0, H = 0;
+  /* ---- crisp canvas at any devicePixelRatio; height tracks width ----
+     Returns true only when the sheet really changed size: assigning
+     canvas.width reallocates and clears the backing store, and `resize`
+     fires on every address-bar nudge on a phone. */
+  var W = 0, H = 0, fitDpr = 0;
   function fitCanvas() {
     var rect = canvas.getBoundingClientRect();
-    W = Math.max(1, Math.round(rect.width));
-    H = Math.round(W * 0.62);
+    var w = Math.max(1, Math.round(rect.width));
     var dpr = window.devicePixelRatio || 1;
+    if (w === W && dpr === fitDpr) return false;
+    W = w;
+    H = Math.round(W * 0.62);
+    fitDpr = dpr;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     canvas.style.height = H + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return true;
+  }
+
+  /* ---- one repaint per frame ----
+     A pointermove can arrive two or three times inside one displayed
+     frame, and this drill takes COALESCED samples — so a single move can
+     carry four more points and used to trigger a full redraw of the
+     figure (head, torso, four limbs, the head-unit ruler) for each one.
+     Only the last is ever shown. One rAF paints on the same vsync and
+     keeps a 6px flick tick feeling instant. */
+  var drawQueued = false;
+  function requestDraw() {
+    if (drawQueued) return;
+    drawQueued = true;
+    requestAnimationFrame(function () { drawQueued = false; draw(); });
   }
 
   /* ---- round state ---- */
@@ -585,9 +617,19 @@
   /* ============================================================
      Input: short drawn ticks, pointerId-guarded, undoable.
      ============================================================ */
+  /* getBoundingClientRect() is a layout read, and this used to run once
+     per SAMPLE — with coalesced events that is four or five layout reads
+     inside a single pointermove. The sheet cannot move under a live tick
+     without a scroll or a resize, and the hint line above it only
+     re-wraps between items, so measure once per gesture and drop the
+     measurement on scroll or resize. */
+  var canvasRect = null;
+  function dropRect() { canvasRect = null; }
+  window.addEventListener('scroll', dropRect, true);
+
   function pointerPos(ev) {
-    var rect = canvas.getBoundingClientRect();
-    return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    var r = canvasRect || (canvasRect = canvas.getBoundingClientRect());
+    return { x: ev.clientX - r.left, y: ev.clientY - r.top };
   }
 
   /* A 6px tick can be one flick: without coalesced samples it lands
@@ -617,6 +659,7 @@
 
   canvas.addEventListener('pointerdown', function (ev) {
     if (!playing || !item) return;
+    dropRect();                  /* a fresh gesture re-measures the sheet */
     if (revealing) {
       /* tap to move on — the reveal is the lesson, so it is read at the
          player's pace, not the timer's (350ms swallow so the release
@@ -643,7 +686,7 @@
     if (!drawing || ev.pointerId !== activeId) return;
     ev.preventDefault();
     pushSamples(ev, strokePts);
-    draw();
+    requestDraw();
   });
 
   function endTick(ev) {
@@ -847,8 +890,12 @@
   }
 
   window.addEventListener('resize', function () {
+    dropRect();
     var oldW = W;
-    fitCanvas();
+    /* fitCanvas is a no-op when the sheet did not really change, so an
+       address-bar nudge no longer reallocates the backing store under a
+       tick in progress. */
+    if (!fitCanvas()) { draw(); return; }
     if (Math.abs(W - oldW) < 4) { draw(); return; } /* mobile URL-bar jitter */
     if (item && oldW > 0 && W !== oldW) scaleItem(W / oldW);
     draw();
