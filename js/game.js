@@ -787,7 +787,33 @@
   }
 
   /* ---- chrome wiring ---- */
-  document.getElementById('btnRound').addEventListener('click', newRound);
+  /* An unfinished round is never reported, so a stray press here binned
+     every item already ticked without a word — and "new round" sits
+     directly under a canvas the player has been tapping to advance
+     reveals, which is exactly where a mis-tap lands. First press arms,
+     second confirms. Once the sixth item has scored the round is already
+     in the books (scoreItem reported it), so no question then. */
+  var btnRound = document.getElementById('btnRound');
+  var btnRoundHTML = btnRound.innerHTML;
+  var roundArmed = false, roundArmTimer = null;
+
+  function disarmRoundBtn() {
+    roundArmed = false;
+    clearTimeout(roundArmTimer);
+    btnRound.innerHTML = btnRoundHTML;
+  }
+
+  btnRound.addEventListener('click', function () {
+    if (playing && itemScores.length > 0 && itemScores.length < ITEMS_PER_ROUND && !roundArmed) {
+      roundArmed = true;
+      btnRound.textContent = 'discard round?';
+      clearTimeout(roundArmTimer);
+      roundArmTimer = setTimeout(disarmRoundBtn, 2600);
+      return;
+    }
+    disarmRoundBtn();
+    newRound();
+  });
 
   var btnHow = document.getElementById('btnHow');
   var howTo = document.getElementById('howTo');
