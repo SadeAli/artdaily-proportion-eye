@@ -2,10 +2,13 @@
    game.js — Proportion Eye: divide lengths by eye, answer with
    the hand. Six items per round, every answer is a short drawn
    tick across the thing being measured: midpoint of a bare
-   segment (x2), both thirds (x2), half a standing figure's
-   height, then a stated ratio like 5/8 from the left end.
-   Ticks are undoable until the item auto-scores (400ms grace).
-   All scoring is pure fraction geometry — the functions at the
+   segment, both thirds, both thirds of a steep one, a stated ratio
+   like 5/8 from the left end, half a standing figure's height, and
+   a midpoint again — the round ends on a win, not on arithmetic.
+   A tick near the line is snapped onto it rather than refused, and
+   ticks stay undoable for 1.8s before the item scores itself.
+   All scoring is pure fraction geometry with an absolute pixel
+   floor under both windows (ArtDaily.ease) — the functions at the
    top take numbers in and return 0–100, no canvas, no DOM.
    ============================================================ */
 (function () {
@@ -13,26 +16,50 @@
 
   var SLUG = 'proportion-eye';
   var ITEMS_PER_ROUND = 6;
-  var MIN_SAMPLES = 3;      /* fewer sampled points = accidental tap  */
+  var MIN_SAMPLES = 2;      /* fewer sampled points = accidental tap  */
   var MIN_TICK_LEN = 6;     /* px of drawn path below this = a tap    */
-  var GRACE_MS = 400;       /* undo window after the last tick lands  */
-  var REVEAL_MS = 2100;
-  var REVEAL_FIGURE_MS = 3200; /* the head-unit ruler needs a beat    */
+  /* A hand slips. Scoring the item 0.4s later, while the hint was still
+     saying "undo still works", meant nobody ever could. */
+  var GRACE_MS = 1800;
+  var REVEAL_MS = 3200;
+  var REVEAL_FIGURE_MS = 4800; /* the head-unit ruler needs a beat    */
   var PERFECT_ZONE = 0.01;  /* err within 1% of the length is perfect */
   var ZERO_AT = 0.10;       /* beyond perfect zone, 10% more = zero   */
+  /* …but never a window tighter than the input device's own noise:
+     1% of a 215px phone segment is 2.15px, and a fingertip's reported
+     centroid wanders ±3–5px. Both floors are eased per input mode. */
+  var PERFECT_FLOOR_PX = 3;
+  var ZERO_FLOOR_PX = 20;
+  var HIT_SLOP_PX = 48;     /* how far off the line a tick may be drawn */
+  var SNAP_FACTOR = 3;      /* …and 3× that is snapped on, not refused  */
+
+  /* The round ends on a midpoint, not on arithmetic: a beginner should
+     finish on the item they are best at. */
+  var ITEM_KINDS = ['mid-flat', 'thirds-flat', 'thirds-steep', 'ratio', 'figure', 'mid-angled'];
 
   /* ============================================================
      Pure scoring — fractions in, 0–100 out. Unit-testable.
      ============================================================ */
   function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
-  /* err = |actualFraction − idealFraction| of the full length.
-     1% perfect-zone, then linear to zero at 11% off.
+  /* The perfect zone and the ramp, in pixels of the measured length:
+     the relative rule, floored so the drill is not stricter on a small
+     screen than on a big one for exactly the same question. floorPx
+     arrives already eased for the player's hardware. */
+  function perfectPx(lenPx, floorPx) {
+    return Math.max(PERFECT_ZONE * lenPx, floorPx > 0 ? floorPx : 0);
+  }
+
+  function spanPx(lenPx, floorPx) {
+    return Math.max(ZERO_AT * lenPx, floorPx > 0 ? floorPx : 0);
+  }
+
+  /* errPx = |actual − ideal| in px along the measured length.
      Non-finite err (missing/garbage mark) scores 0, never NaN. */
-  function markScore(err) {
-    if (typeof err !== 'number' || isNaN(err)) return 0;
-    var e = Math.max(0, err - PERFECT_ZONE);
-    return 100 * clamp01(1 - e / ZERO_AT);
+  function markScore(errPx, perfect, span) {
+    if (typeof errPx !== 'number' || !isFinite(errPx) || !(span > 0)) return 0;
+    var e = Math.max(0, errPx - (perfect > 0 ? perfect : 0));
+    return 100 * clamp01(1 - e / span);
   }
 
   /* Pair player fractions with ideal fractions (both ascending) so
@@ -52,11 +79,12 @@
     return out;
   }
 
-  /* Item = mean of its marks' scores. */
-  function itemScore(actuals, ideals) {
+  /* Item = mean of its marks' scores. lenPx is the measured length, so
+     the fraction errors become pixels and can meet their floors. */
+  function itemScore(actuals, ideals, lenPx, perfect, span) {
     var pairs = pairMarks(actuals, ideals);
     var sum = 0, i;
-    for (i = 0; i < pairs.length; i++) sum += markScore(pairs[i].err);
+    for (i = 0; i < pairs.length; i++) sum += markScore(pairs[i].err * lenPx, perfect, span);
     return pairs.length ? sum / pairs.length : 0;
   }
 
@@ -178,7 +206,7 @@
 
   /* ---- round state ---- */
   var round = 0, itemIdx = 0, itemScores = [], item = null, playing = false;
-  var drawing = false, strokePts = [], activeId = null, revealing = null;
+  var drawing = false, strokePts = [], activeId = null, activeType = '', revealing = null;
   var graceTimer = null, revealTimer = null;
   var roundResult = null; /* ArtDaily.report() result, set the moment
                              the 6th item scores — so a completed round
@@ -195,9 +223,13 @@
   function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
 
   /* ---- item geometry ---- */
+  /* On a narrow sheet the ruler gets longer and the margins thinner
+     rather than the tolerance getting tighter: the same question should
+     be the same question on a phone. */
   function segGeom(angDeg, fracLo, fracHi) {
-    var margin = 36;
-    var len = W * rand(fracLo, fracHi);
+    var small = W < 520;
+    var margin = small ? 18 : 36;
+    var len = W * rand(fracLo, fracHi) * (small ? 1.18 : 1);
     var ang = angDeg * Math.PI / 180;
     var dx = Math.cos(ang), dy = Math.sin(ang);
     if (Math.abs(dx) > 0.01) len = Math.min(len, (W - 2 * margin) / Math.abs(dx));
@@ -214,13 +246,16 @@
     return { x: -(b.y - a.y) / len, y: (b.x - a.x) / len };
   }
 
-  /* Difficulty ramps within the round: flat long midpoint → any-angle
-     midpoint → flat thirds → steep thirds → the figure → a stated ratio. */
+  /* Difficulty ramps within the round and then comes back down: an easy
+     long midpoint → thirds → steep thirds → a stated ratio → the figure
+     → a midpoint again, so the round ends on the item beginners are
+     best at instead of on arithmetic. */
   function makeItem(idx) {
     clearTimeout(graceTimer);
     graceTimer = null;
+    var kindName = ITEM_KINDS[idx] || 'mid-flat';
     var g, n, r;
-    if (idx === 4) {
+    if (kindName === 'figure') {
       var h = H * 0.8;
       var u = h / 7.5;
       var top = H * 0.085;
@@ -230,16 +265,16 @@
         a: { x: cx, y: top }, b: { x: cx, y: top + h },
         nx: 1, ny: 0,
         ideals: [0.5], labels: ['1/2'], required: 1,
-        maxDist: Math.max(70, u * 2),
+        maxDist: Math.max(ArtDaily.startRadius(70), u * 2),
         ticks: [],
         fig: { cx: cx, top: top, h: h, u: u },
       };
     } else {
       var kind = 'seg', ideals = [0.5], labels = ['1/2'];
-      if (idx === 0) g = segGeom(rand(-8, 8), 0.58, 0.72);
-      else if (idx === 1) g = segGeom(Math.random() < 0.5 ? rand(25, 65) : rand(115, 155), 0.42, 0.58);
-      else if (idx === 2) { g = segGeom(rand(-10, 10), 0.58, 0.75); ideals = [1 / 3, 2 / 3]; labels = ['1/3', '2/3']; }
-      else if (idx === 3) { g = segGeom(rand(58, 122), 0.5, 0.68); ideals = [1 / 3, 2 / 3]; labels = ['1/3', '2/3']; }
+      if (kindName === 'mid-flat') g = segGeom(rand(-8, 8), 0.62, 0.78);
+      else if (kindName === 'mid-angled') g = segGeom(Math.random() < 0.5 ? rand(25, 65) : rand(115, 155), 0.42, 0.58);
+      else if (kindName === 'thirds-flat') { g = segGeom(rand(-10, 10), 0.58, 0.75); ideals = [1 / 3, 2 / 3]; labels = ['1/3', '2/3']; }
+      else if (kindName === 'thirds-steep') { g = segGeom(rand(58, 122), 0.5, 0.68); ideals = [1 / 3, 2 / 3]; labels = ['1/3', '2/3']; }
       else {
         kind = 'ratio';
         g = segGeom(rand(-6, 6), 0.5, 0.66); /* dx>0, so a is the left end */
@@ -252,10 +287,15 @@
         kind: kind,
         a: g.a, b: g.b, nx: n.x, ny: n.y,
         ideals: ideals, labels: labels, required: ideals.length,
-        maxDist: 48,
+        /* a screenless tablet cannot see its own hand: the zone a tick
+           may land in is widened for exactly that instrument, and a
+           press up to 3× out is snapped onto the line rather than
+           refused (see endTick) */
+        maxDist: ArtDaily.startRadius(HIT_SLOP_PX),
         ticks: [],
       };
     }
+    item.len = Math.hypot(item.b.x - item.a.x, item.b.y - item.a.y);
     hint.textContent = itemHint();
     updateUndo();
   }
@@ -263,10 +303,13 @@
   function itemHint() {
     var lbl = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ';
     if (!item) return '';
-    if (item.kind === 'figure') return lbl + 'tick across the figure at half its height.';
+    if (item.kind === 'figure') {
+      return lbl + 'tick across the figure at half its whole height, crown to soles. ' +
+        'the marks beside it are one head tall each — count them.';
+    }
     if (item.kind === 'ratio') return lbl + 'tick ' + item.labels[0] + ' of the way from the left end.';
     if (item.required === 2) return lbl + 'tick both thirds of the line (' + item.ticks.length + ' of 2 placed).';
-    return lbl + 'draw a tick across the line at its midpoint.';
+    return lbl + 'draw a tick across the line at its midpoint (halfway along).';
   }
 
   function newRound() {
@@ -382,6 +425,30 @@
       ctx.stroke();
     }
     ctx.restore();
+    /* The measuring tool, unlabeled, while the guess is still open: the
+       height is some number of these marks. Naming that number — and
+       where half of it lands — stays the reveal's job. */
+    if (!revealing) {
+      ctx.save();
+      /* same 0.5 the dashed extent guides use — muted at full alpha is
+         5.2:1 on the paper card, so this stays clear of the 3:1 bar for
+         a mark the player is meant to count */
+      ctx.globalAlpha = 0.5;
+      ctx.strokeStyle = c.muted;
+      ctx.lineWidth = 1.5;
+      var rx = cx - u * 1.5, q;
+      ctx.beginPath();
+      ctx.moveTo(rx, f.top);
+      ctx.lineTo(rx, f.top + f.h);
+      ctx.stroke();
+      for (q = 1; q <= 7; q++) {
+        ctx.beginPath();
+        ctx.moveTo(rx - 3, f.top + q * u);
+        ctx.lineTo(rx + 3, f.top + q * u);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
     /* dashed extent guides: this is the length you are halving */
     ctx.save();
     ctx.globalAlpha = 0.5;
@@ -415,6 +482,14 @@
     }
   }
 
+  /* "3.2% off" on a short phone segment is ~7px — a distance the player
+     could not have controlled. Say both, so the feedback is honest about
+     what was actually achievable on this screen. */
+  function offLabel(err) {
+    if (!isFinite(err)) return 'no mark';
+    return (err * 100).toFixed(1) + '% off · ' + Math.round(err * item.len) + 'px';
+  }
+
   function drawReveal(c) {
     var i, P, M, off;
     if (item.kind === 'figure') {
@@ -446,8 +521,8 @@
       putText('1/2 · 3.75 heads', cx, hy - 9, c.accent, 12);
       /* how far off the tick landed */
       M = lerp(item.a, item.b, revealing.pairs[0].actual);
-      off = (revealing.pairs[0].err * 100).toFixed(1) + '% off';
-      putText(off, Math.min(W - 50, cx + u * 1.25), M.y + 4, c.ink, 11, 'left');
+      off = offLabel(revealing.pairs[0].err);
+      putText(off, Math.min(W - 62, cx + u * 1.25), M.y + 4, c.ink, 11, 'left');
       return;
     }
     var nx = item.nx, ny = item.ny;
@@ -463,7 +538,7 @@
       putText(item.labels[i], P.x + nx * 27, P.y + ny * 27 + 4, c.accent, 12);
       /* the player's mark, labeled with its % off, opposite side */
       M = lerp(item.a, item.b, revealing.pairs[i].actual);
-      off = (revealing.pairs[i].err * 100).toFixed(1) + '% off';
+      off = offLabel(revealing.pairs[i].err);
       putText(off, M.x - nx * 27, M.y - ny * 27 + 4, c.ink, 11);
     }
   }
@@ -515,15 +590,49 @@
     return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
   }
 
+  /* A 6px tick can be one flick: without coalesced samples it lands
+     under the sample floor and is thrown away as "just a tap". */
+  function pushSamples(ev, arr) {
+    var list = null;
+    try { list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null; } catch (e) { list = null; }
+    if (list && list.length) {
+      for (var i = 0; i < list.length; i++) arr.push(pointerPos(list[i]));
+      return;
+    }
+    arr.push(pointerPos(ev));
+  }
+
+  /* Palm rejection: the old guard let whichever pointer arrived first
+     own the tick, which on a tablet is the palm. */
+  var penAt = -Infinity, PEN_GUARD_MS = 900;
+  function claimAllowed(ev) {
+    if (ev.pointerType === 'pen') { penAt = performance.now(); return true; }
+    if (ev.pointerType === 'touch' && performance.now() - penAt < PEN_GUARD_MS) return false;
+    return true;
+  }
+
   function updateUndo() {
     btnUndo.disabled = !(playing && !revealing && item && item.ticks.length > 0);
   }
 
   canvas.addEventListener('pointerdown', function (ev) {
-    if (!playing || revealing || drawing || !item) return;
+    if (!playing || !item) return;
+    if (revealing) {
+      /* tap to move on — the reveal is the lesson, so it is read at the
+         player's pace, not the timer's (350ms swallow so the release
+         that just placed a tick cannot skip its own feedback) */
+      if (performance.now() - revealing.at > 350) nextStep();
+      return;
+    }
+    if (!claimAllowed(ev)) return;
+    if (drawing) {
+      if (ev.pointerType !== 'pen' || activeType === 'pen') return;
+      strokePts = []; /* a pen outranks the palm that got here first */
+    }
     if (item.ticks.length >= item.required) return; /* grace: undo or wait */
     ev.preventDefault();
     activeId = ev.pointerId;
+    activeType = ev.pointerType || '';
     drawing = true;
     strokePts = [pointerPos(ev)];
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
@@ -533,7 +642,7 @@
   canvas.addEventListener('pointermove', function (ev) {
     if (!drawing || ev.pointerId !== activeId) return;
     ev.preventDefault();
-    strokePts.push(pointerPos(ev));
+    pushSamples(ev, strokePts);
     draw();
   });
 
@@ -541,6 +650,7 @@
     if (!drawing || ev.pointerId !== activeId) return;
     ev.preventDefault();
     drawing = false;
+    activeType = '';
     var pts = strokePts;
     strokePts = [];
     /* accidental tap — ignore, never penalize */
@@ -550,17 +660,24 @@
       return;
     }
     var m = strokeFraction(pts, item.a, item.b);
-    /* stroke nowhere near the thing being measured — ignore, no penalty */
-    if (m.dist > item.maxDist) {
+    /* Snap rather than refuse. Inside the zone the tick is taken as
+       drawn; out to 3× it is still taken — projected onto the line,
+       which is what the eye meant — and only beyond that is it read as
+       a stroke aimed at something else. A screenless tablet cannot see
+       its own hand, and a refusal it cannot explain reads as "broken". */
+    if (m.dist > item.maxDist * SNAP_FACTOR) {
       hint.textContent = itemHint().replace(/ —.*$/, '') +
-        ' — tick across the ' + (item.kind === 'figure' ? 'figure' : 'line') + ' itself.';
+        ' — that one landed away from the ' + (item.kind === 'figure' ? 'figure' : 'line') +
+        ', so it was not counted. tick across it and it counts wherever it crosses.';
       draw();
       return;
     }
     item.ticks.push({ points: pts, frac: m.frac });
     updateUndo();
     if (item.ticks.length >= item.required) {
-      hint.textContent = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — scoring… undo still works.';
+      hint.textContent = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ' +
+        (m.dist > item.maxDist ? 'pulled onto the line for you; ' : '') +
+        'scoring in a moment, "undo" still works.';
       clearTimeout(graceTimer);
       graceTimer = setTimeout(scoreItem, GRACE_MS);
     } else {
@@ -572,14 +689,18 @@
   /* fallback if pointer capture failed and the release lands off-canvas */
   window.addEventListener('pointerup', endTick);
 
-  canvas.addEventListener('pointercancel', function () {
+  function cancelTick(ev) {
     /* interrupted stroke (system gesture etc.) — reset, no penalty */
     if (!drawing) return;
+    if (ev && ev.pointerId !== undefined && ev.pointerId !== activeId) return;
     drawing = false;
+    activeType = '';
     strokePts = [];
     if (playing && !revealing) hint.textContent = itemHint();
     draw();
-  });
+  }
+  canvas.addEventListener('pointercancel', cancelTick);
+  window.addEventListener('pointercancel', cancelTick);
 
   function undo() {
     if (!playing || revealing || !item || !item.ticks.length) return;
@@ -603,7 +724,9 @@
     if (!playing || !item || item.ticks.length < item.required) return;
     var fracs = [], i;
     for (i = 0; i < item.ticks.length; i++) fracs.push(item.ticks[i].frac);
-    var sc = itemScore(fracs, item.ideals);
+    var sc = itemScore(fracs, item.ideals, item.len,
+      perfectPx(item.len, ArtDaily.ease(PERFECT_FLOOR_PX)),
+      spanPx(item.len, ArtDaily.ease(ZERO_FLOOR_PX)));
     itemScores.push(sc);
     /* The round is complete right here, not after the last reveal —
        report now so an interrupting "new round" can't swallow it. */
@@ -611,10 +734,14 @@
       roundResult = ArtDaily.report(roundScore(itemScores));
       hudBest.textContent = roundResult.best === null ? '–' : String(roundResult.best);
     }
-    revealing = { score: Math.round(sc), pairs: pairMarks(fracs, item.ideals) };
+    /* a running mean, so the round is never six items of silence */
+    hudScore.textContent = String(Math.round(roundScore(itemScores)));
+    revealing = { score: Math.round(sc), pairs: pairMarks(fracs, item.ideals), at: performance.now() };
     updateUndo();
     hint.textContent = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ' + revealing.score +
-      (item.kind === 'figure' ? '. half a figure = 3.75 of its 7.5 heads.' : '. mint lines are the true divisions.');
+      (item.kind === 'figure'
+        ? '. half a figure = 3.75 of its 7.5 heads. tap to continue.'
+        : '. the coloured lines are the true divisions. tap to continue.');
     draw();
     clearTimeout(revealTimer);
     revealTimer = setTimeout(nextStep, item.kind === 'figure' ? REVEAL_FIGURE_MS : REVEAL_MS);
@@ -622,6 +749,7 @@
 
   function nextStep() {
     if (!revealing) return;
+    clearTimeout(revealTimer);
     revealing = null;
     itemIdx += 1;
     if (itemIdx < ITEMS_PER_ROUND) {
@@ -669,12 +797,34 @@
   });
 
   ArtDaily.onTheme(draw);
+  ArtDaily.onInput(function () { draw(); });
+
+  /* The sheet scales uniformly (H tracks W), so a resize is a rescale of
+     what is already there — never a regeneration. Regenerating meant an
+     iOS address bar collapsing during an ordinary scroll silently
+     deleted a placed tick AND swapped the question. */
+  function scaleItem(f) {
+    var i, j, t;
+    item.a.x *= f; item.a.y *= f;
+    item.b.x *= f; item.b.y *= f;
+    item.len *= f;
+    item.maxDist *= f;
+    if (item.fig) {
+      item.fig.cx *= f; item.fig.top *= f; item.fig.h *= f; item.fig.u *= f;
+    }
+    for (i = 0; i < item.ticks.length; i++) {
+      t = item.ticks[i];
+      for (j = 0; j < t.points.length; j++) { t.points[j].x *= f; t.points[j].y *= f; }
+      /* t.frac is a fraction of the length — scale-invariant, kept */
+    }
+    for (j = 0; j < strokePts.length; j++) { strokePts[j].x *= f; strokePts[j].y *= f; }
+  }
+
   window.addEventListener('resize', function () {
+    var oldW = W;
     fitCanvas();
-    /* re-place the current item so it always fits the new canvas;
-       placed ticks reset with it (their fractions belonged to the
-       old geometry) — makeItem also clears any pending grace timer */
-    if (playing && !revealing && !drawing && item) makeItem(itemIdx);
+    if (Math.abs(W - oldW) < 4) { draw(); return; } /* mobile URL-bar jitter */
+    if (item && oldW > 0 && W !== oldW) scaleItem(W / oldW);
     draw();
   });
 

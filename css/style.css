@@ -39,7 +39,7 @@
   --hand: 'Caveat', 'Segoe Print', 'Comic Sans MS', cursive;
   --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
 
-  --game-accent: var(--mint);
+  --game-accent: var(--mint); /* TODO: pick this game's accent */
 }
 
 :root[data-theme="dark"] {
@@ -383,9 +383,36 @@ a { color: inherit; }
   }
 }
 
+/* The SDK fills this when it knows the input hardware. Scores are eased
+   per device, so the drill says which device it eased for. */
+.hud-input { min-width: 0; border: 0; background: none; padding: 5px 2px; display: flex; align-items: flex-end; }
+.hud-input dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  max-width: 8.5rem;
+  line-height: 1.25;
+}
+
 /* ============================================================
    game-specific styles below this line
    ============================================================ */
+
+/* Settling the hand on the sheet before a careful tick is a long press
+   on iOS, which raises the copy/share callout over the drawing.
+   touch-action: none is already set on .game-canvas above. */
+.game-canvas {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* "undo" is tapped fast and often — without this a quick double tap
+   zooms the page and the new scale survives into the next tick. */
+.btn { touch-action: manipulation; }
 
 /* This drill is all fingers-on-canvas, so every in-game button is a
    proper touch target: the template's sticker buttons are ~37px tall,
