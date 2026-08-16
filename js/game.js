@@ -100,11 +100,22 @@
     return pairs.length ? sum / pairs.length : 0;
   }
 
-  /* Round = mean of its items' scores. */
+  /* Round = mean of its items' scores. itemScore can only hand this finite
+     0–100 values, but this mean is what reaches ArtDaily.report — and from
+     there the permanent personal best — as well as the HUD after every
+     single item, and it had no sanitizing layer at all: one bad item would
+     print the literal text "NaN" and store it as a best no round could ever
+     beat. Clamped as well as finiteness-checked, the way vp-hunt's,
+     horizon-read's and anatomy-spot's twins already are, because a finite
+     "3e+307 / 100" is no better on the HUD than a NaN. The identity on
+     every value this drill has ever produced. */
   function roundScore(scores) {
     if (!scores.length) return 0;
-    var sum = 0, i;
-    for (i = 0; i < scores.length; i++) sum += scores[i];
+    var sum = 0, i, v;
+    for (i = 0; i < scores.length; i++) {
+      v = scores[i];
+      sum += (typeof v === 'number' && isFinite(v)) ? Math.max(0, Math.min(100, v)) : 0;
+    }
     return sum / scores.length;
   }
 
@@ -370,7 +381,18 @@
         'the marks beside it are one head tall each — count them.';
     }
     if (item.kind === 'ratio') return lbl + 'tick ' + item.labels[0] + ' of the way from the left end.';
-    if (item.required === 2) return lbl + 'tick both thirds of the line (' + item.ticks.length + ' of 2 placed).';
+    /* "TICK BOTH THIRDS" IS TWO CUTS, NOT THREE PIECES — and item 2 is the
+       first time the drill has asked for anything but a midpoint, roughly
+       thirty seconds in. Read as "the thirds" it sounds like the parts, so
+       the natural wrong move is one tick in the middle of a third. Gloss it
+       the same way item 1 glosses "midpoint (halfway along)", and only on
+       the item where the phrase is new — items 3 and 6 ask again and by
+       then the reveal has already drawn both answers. */
+    if (item.required === 2) {
+      return lbl + 'tick both thirds of the line' +
+        (itemIdx === 1 ? ' — the two cuts that split it into three equal parts' : '') +
+        ' (' + item.ticks.length + ' of 2 placed).';
+    }
     return lbl + 'draw a tick across the line at its midpoint (halfway along).';
   }
 
