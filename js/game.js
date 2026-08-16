@@ -138,6 +138,24 @@
     return { frac: bestFrac, dist: best };
   }
 
+  /* WHICH WAY the tick missed — the reveal's one sentence used to be the
+     bare score ("item 1 of 6 — 87."), which is a grade, not a lesson, and
+     87 of what was not even stated. The % and the px are already painted
+     on the sheet under their own labels; the direction is the thing a
+     player can DO differently on item 2. Compares the two marks where
+     they actually sit, so it stays honest on a steep segment (above /
+     below) as well as a flat one (left / right). Pure: two points in,
+     English out, non-finite-safe. */
+  function tickDirection(mark, truth) {
+    if (!mark || !truth) return '';
+    var dx = mark.x - truth.x, dy = mark.y - truth.y;
+    if (!isFinite(dx) || !isFinite(dy)) return '';
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return 'right on it';
+    return Math.abs(dx) >= Math.abs(dy)
+      ? (dx < 0 ? 'left of it' : 'right of it')
+      : (dy < 0 ? 'above it' : 'below it');
+  }
+
   function pathLength(points) {
     var sum = 0, i;
     for (i = 1; i < points.length; i++) {
@@ -781,10 +799,17 @@
     hudScore.textContent = String(Math.round(roundScore(itemScores)));
     revealing = { score: Math.round(sc), pairs: pairMarks(fracs, item.ideals), at: performance.now() };
     updateUndo();
-    hint.textContent = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ' + revealing.score +
+    var dir = item.required === 1
+      ? tickDirection(lerp(item.a, item.b, revealing.pairs[0].actual),
+        lerp(item.a, item.b, item.ideals[0]))
+      : '';
+    hint.textContent = 'item ' + (itemIdx + 1) + ' of ' + ITEMS_PER_ROUND + ' — ' +
+      revealing.score + '/100' + (dir ? ', your tick landed ' + dir : '') +
       (item.kind === 'figure'
         ? '. half a figure = 3.75 of its 7.5 heads. tap to continue.'
-        : '. the coloured lines are the true divisions. tap to continue.');
+        : item.required === 1
+          ? '. the coloured line is the true ' + item.labels[0] + '. tap to continue.'
+          : '. the coloured lines are the true divisions. tap to continue.');
     draw();
     clearTimeout(revealTimer);
     revealTimer = setTimeout(nextStep, item.kind === 'figure' ? REVEAL_FIGURE_MS : REVEAL_MS);
