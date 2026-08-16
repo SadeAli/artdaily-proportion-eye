@@ -40,7 +40,19 @@
   /* ============================================================
      Pure scoring — fractions in, 0–100 out. Unit-testable.
      ============================================================ */
-  function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+  /* NaN-safe, the way vp-hunt's and anatomy-spot's twins already are.
+     Math.max/Math.min PROPAGATE NaN, so the old pair let one through
+     untouched — and projFraction ends in a clamp01, which meant a
+     non-finite point came back out as a non-finite FRACTION rather than
+     as a refusal. That fraction is the tick's mark: pairMarks reads a
+     non-finite mark as a missing one and scores a tick the player really
+     drew a flat 0, with the reveal drawing its label nowhere.
+     The sample pipeline no longer lets a non-finite point get this far
+     (pushSamples drops them), so this is the second of two layers, and it
+     is the identity on every value the drill actually produces: markScore
+     has already checked errPx is finite and span > 0 before it calls
+     this, and projFraction's argument is finite whenever its point is. */
+  function clamp01(v) { return v > 0 ? (v < 1 ? v : 1) : 0; }
 
   /* The perfect zone and the ramp, in pixels of the measured length:
      the relative rule, floored so the drill is not stricter on a small
@@ -651,15 +663,37 @@
   }
 
   /* A 6px tick can be one flick: without coalesced samples it lands
-     under the sample floor and is thrown away as "just a tap". */
+     under the sample floor and is thrown away as "just a tap".
+     (ArtDaily.samples is the SDK's version of exactly this: every position
+     the move really carried, oldest first, and [ev] where the browser
+     cannot coalesce. Same behaviour, one implementation.)
+
+     NON-FINITE SAMPLES ARE DROPPED, not stored. Nothing downstream can
+     survive one: segCrossFraction divides by a NaN determinant, and NaN
+     fails `denom === 0` and then fails all four of the t/u range tests, so
+     it does not return null the way a real miss does — it returns NaN as a
+     crossing. strokeFraction hands that straight back as the tick's
+     fraction, pairMarks reads a non-finite mark as a MISSING one, and a
+     tick the player really drew across the line scores a flat 0 with the
+     reveal drawing nothing where it landed. Sweeping one bad sample across
+     a 72-sample tick, 36 of the 72 positions do this — every position
+     ahead of the crossing. The next sample is 4ms away; skip the bad one.
+
+     They are deliberately NOT thinned to a minimum spacing the way
+     vp-hunt's and perspective's are. Those two fit a LINE to their
+     samples, where even spacing is what stops a slow patch outvoting the
+     stroke; this drill measures pathLength against a 6px floor to tell a
+     tick from a tap, and thinning replaces the drawn wiggle with its
+     chord. Measured at 2px spacing: 210 of 4000 genuinely short ticks
+     dropped under the floor and came back as "just a tap; draw a short
+     stroke across it" — a refusal aimed at a player who did exactly what
+     was asked. */
   function pushSamples(ev, arr) {
-    var list = null;
-    try { list = ev.getCoalescedEvents ? ev.getCoalescedEvents() : null; } catch (e) { list = null; }
-    if (list && list.length) {
-      for (var i = 0; i < list.length; i++) arr.push(pointerPos(list[i]));
-      return;
+    var list = ArtDaily.samples(ev), i, p;
+    for (i = 0; i < list.length; i++) {
+      p = pointerPos(list[i]);
+      if (isFinite(p.x) && isFinite(p.y)) arr.push(p);
     }
-    arr.push(pointerPos(ev));
   }
 
   /* Palm rejection: the old guard let whichever pointer arrived first
@@ -695,7 +729,13 @@
     activeId = ev.pointerId;
     activeType = ev.pointerType || '';
     drawing = true;
-    strokePts = [pointerPos(ev)];
+    /* the opening sample gets the same finiteness check the rest of the
+       stroke does — a broken first press must not seed the tick with a
+       NaN the whole path then inherits. An empty start is harmless: the
+       moves fill it, and a stroke that never lands a finite sample reads
+       as the tap it was. */
+    var p0 = pointerPos(ev);
+    strokePts = (isFinite(p0.x) && isFinite(p0.y)) ? [p0] : [];
     try { canvas.setPointerCapture(ev.pointerId); } catch (e) {}
     draw();
   });
@@ -762,6 +802,23 @@
   }
   canvas.addEventListener('pointercancel', cancelTick);
   window.addEventListener('pointercancel', cancelTick);
+  /* A CAPTURE THE CANVAS LOSES WITHOUT EVER SEEING A RELEASE. iOS drops
+     pointer capture to a system gesture and fires lostpointercapture with
+     no pointerup and no pointercancel behind it — and `drawing` stays true
+     for good. pointerdown then reads that as "a stroke is already in
+     flight" and returns on every later press (only a pen outranks it), so
+     the sheet goes permanently dead: no tick can be drawn, the item can
+     never reach its required count, and the round stalls with no way out
+     but "new round". Replayed as a state machine, all four presses after
+     the steal were refused and no tick landed; with this line all of them
+     are taken. The five sibling drills each carry this guard; this one was
+     the only drag drill without it.
+     It abandons rather than scores, exactly as perspective does: a lost
+     capture has no honest release position. Behind a real pointerup it is
+     a no-op — `drawing` is already false — and cancelTick ignores any
+     pointer that is not the one holding the tick, so a stray second finger
+     losing capture cannot wipe a live stroke. */
+  canvas.addEventListener('lostpointercapture', cancelTick);
 
   function undo() {
     if (!playing || revealing || !item || !item.ticks.length) return;
